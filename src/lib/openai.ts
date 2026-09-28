@@ -36,7 +36,8 @@ async function request(apiKey: string, path: string, init: RequestInit = {}): Pr
     })
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err
-    throw new OpenAIError('Network error — could not reach api.openai.com.')
+    // OpenAI omits CORS headers on some error responses, which surfaces here as a network error.
+    throw new OpenAIError('Request failed — check your API key and network connection.')
   }
   if (!res.ok) throw await toError(res)
   return res
@@ -108,15 +109,33 @@ export type ContentPart =
   | { type: 'input_file'; file_id: string }
   | { type: 'input_image'; file_id: string }
 
+export type Tool =
+  | { type: 'code_interpreter'; container: { type: 'auto'; file_ids?: string[] } }
+  | { type: 'image_generation' }
+
 export interface GenerateParams {
   model: string
   instructions: string
   content: ContentPart[]
+  tools?: Tool[]
+}
+
+interface Annotation {
+  type: string
+  container_id?: string
+  file_id?: string
+  filename?: string
 }
 
 interface OutputItem {
   type: string
-  content?: { type: string; text?: string }[]
+  id?: string
+  content?: { type: string; text?: string; annotations?: Annotation[] }[]
+  /** code_interpreter_call */
+  container_id?: string
+  /** image_generation_call: base64 image */
+  result?: string
+  output_format?: string
 }
 
 function outputText(output: OutputItem[] | undefined): string {
@@ -128,13 +147,44 @@ function outputText(output: OutputItem[] | undefined): string {
     .join('')
 }
 
-/** Streams a Responses API call, invoking onDelta with each text chunk. Returns the full text. */
+export interface StreamedFile {
+  id: string
+  name: string
+  source: 'container' | 'image'
+  containerId?: string
+  fileId?: string
+  /** base64 bytes for generated images */
+  base64?: string
+  mime?: string
+}
+
+export interface StreamResult {
+  text: string
+  files: StreamedFile[]
+  containerIds: string[]
+}
+
+export interface StreamHandlers {
+  onDelta: (chunk: string) => void
+  onStatus?: (status: string) => void
+}
+
+const STATUS: Record<string, string> = {
+  'response.code_interpreter_call.in_progress': 'Running Python…',
+  'response.code_interpreter_call.interpreting': 'Running Python…',
+  'response.code_interpreter_call_code.delta': 'Writing code…',
+  'response.image_generation_call.in_progress': 'Generating image…',
+  'response.image_generation_call.generating': 'Generating image…',
+  'response.reasoning_summary_text.delta': 'Thinking…',
+}
+
+/** Streams a Responses API call. Text chunks go to onDelta; files the model creates are collected. */
 export async function streamResponse(
   apiKey: string,
   params: GenerateParams,
-  onDelta: (chunk: string) => void,
+  handlers: StreamHandlers,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<StreamResult> {
   const res = await request(
     apiKey,
     '/responses',
@@ -143,6 +193,7 @@ export async function streamResponse(
         model: params.model,
         instructions: params.instructions,
         input: [{ role: 'user', content: params.content }],
+        tools: params.tools?.length ? params.tools : undefined,
         stream: true,
         store: false,
       },
@@ -154,20 +205,59 @@ export async function streamResponse(
   const decoder = new TextDecoder()
   let buffer = ''
   let text = ''
+  const files = new Map<string, StreamedFile>()
+  const containerIds = new Set<string>()
+
+  const collect = (item: OutputItem) => {
+    if (item.type === 'code_interpreter_call' && item.container_id) containerIds.add(item.container_id)
+    if (item.type === 'image_generation_call' && item.result) {
+      const ext = item.output_format || 'png'
+      const n = [...files.values()].filter((f) => f.source === 'image').length + 1
+      files.set(item.id ?? `img${n}`, {
+        id: item.id ?? `img${n}`,
+        name: `image-${n}.${ext}`,
+        source: 'image',
+        base64: item.result,
+        mime: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+      })
+    }
+    if (item.type === 'message') {
+      for (const c of item.content ?? []) {
+        for (const a of c.annotations ?? []) {
+          if (a.type === 'container_file_citation' && a.file_id && a.container_id) {
+            containerIds.add(a.container_id)
+            files.set(a.file_id, {
+              id: a.file_id,
+              name: a.filename || a.file_id,
+              source: 'container',
+              containerId: a.container_id,
+              fileId: a.file_id,
+            })
+          }
+        }
+      }
+    }
+  }
 
   const handle = (data: string) => {
     if (!data || data === '[DONE]') return
     const event = JSON.parse(data)
+    const status = STATUS[event.type]
+    if (status) handlers.onStatus?.(status)
     switch (event.type) {
       case 'response.output_text.delta':
         text += event.delta
-        onDelta(event.delta)
+        handlers.onStatus?.('')
+        handlers.onDelta(event.delta)
+        break
+      case 'response.output_item.done':
+        collect(event.item)
         break
       case 'response.failed':
         throw new OpenAIError(event.response?.error?.message ?? 'The response failed.')
       case 'response.incomplete': {
         const reason = event.response?.incomplete_details?.reason
-        if (!text) throw new OpenAIError(`Response incomplete${reason ? `: ${reason}` : ''}.`)
+        if (!text && !files.size) throw new OpenAIError(`Response incomplete${reason ? `: ${reason}` : ''}.`)
         break
       }
       case 'error':
@@ -191,7 +281,35 @@ export async function streamResponse(
       handle(data)
     }
   }
-  return text
+  return { text, files: [...files.values()], containerIds: [...containerIds] }
+}
+
+/* ---------- Container files (created by Code Interpreter) ---------- */
+
+interface ContainerFile {
+  id: string
+  path: string
+  source?: string
+}
+
+/** Files the model wrote into a container (excludes the user's own uploads). */
+export async function listContainerFiles(apiKey: string, containerId: string): Promise<StreamedFile[]> {
+  const res = await request(apiKey, `/containers/${containerId}/files?limit=100`)
+  const body = (await res.json()) as { data: ContainerFile[] }
+  return body.data
+    .filter((f) => f.source !== 'user')
+    .map((f) => ({
+      id: f.id,
+      name: f.path.split('/').pop() || f.id,
+      source: 'container' as const,
+      containerId,
+      fileId: f.id,
+    }))
+}
+
+export async function downloadContainerFile(apiKey: string, containerId: string, fileId: string): Promise<Blob> {
+  const res = await request(apiKey, `/containers/${containerId}/files/${fileId}/content`)
+  return res.blob()
 }
 
 /* ---------- Tab metadata from a prompt ---------- */

@@ -13,6 +13,10 @@ Frontend only — no backend, no database. Deploys as a static site (e.g. Vercel
   - Text files (`.txt`, `.md`, `.csv`, `.json`, code…, up to 300 KB) are read locally and appended to the prompt.
   - PDFs, office documents and images are uploaded to the user's OpenAI account (Files API) and sent by file id. Removing an attachment or deleting a tab deletes the uploaded file.
 - **Generation** — `POST /v1/responses` with `stream: true`, `store: false`; output streams into the tab and the last 30 runs are kept as history.
+- **Generated files** (per-tab options)
+  - *Create downloadable files* enables the `code_interpreter` tool: the model writes any file (PDF, DOCX, XLSX, PPTX, CSV, charts, ZIP…) with Python. The app collects the files from the container (`/v1/containers/{id}/files`) and downloads them immediately, since containers expire after ~20 minutes idle. Attached Word/Excel files are mounted into the container so Python can read them.
+  - *Generate images* enables the `image_generation` tool; images arrive base64 in the response and are shown with a download button.
+  - File bytes are kept in memory only; history keeps file names and can re-fetch container files while they still exist.
 
 ## Development
 

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import type { Attachment, PromptTab, Settings } from '../types'
+import type { Attachment, PromptTab, Settings, TabTools } from '../types'
 import { deleteFile, describeError, generateTabMeta, textModels } from '../lib/openai'
 import { ACCEPT, createAttachment, formatSize } from '../lib/attachments'
 import { uid } from '../lib/storage'
@@ -27,6 +27,7 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
   const [inputPlaceholder, setInputPlaceholder] = useState(tab?.inputPlaceholder ?? '')
   const [model, setModel] = useState(tab?.model ?? '')
   const [attachments, setAttachments] = useState<Attachment[]>(tab?.attachments ?? [])
+  const [tools, setTools] = useState<TabTools>(tab?.tools ?? { files: !tab, images: false })
   const [pending, setPending] = useState<Pending[]>([])
   const [busy, setBusy] = useState<'' | 'suggest' | 'save'>('')
   const [error, setError] = useState('')
@@ -101,6 +102,7 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
       instructions: instructions.trim(),
       model,
       attachments,
+      tools,
       name: meta.name.trim(),
       description: meta.description.trim(),
       inputLabel: meta.inputLabel.trim() || 'Input',
@@ -206,6 +208,29 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
             ))}
           </ul>
         )}
+      </div>
+
+      <div className="field">
+        <span>Output</span>
+        <label className="check option">
+          <input type="checkbox" checked={tools.files} onChange={(e) => setTools((t) => ({ ...t, files: e.target.checked }))} />
+          <span>
+            <strong>Create downloadable files</strong>
+            <span className="muted small">
+              The AI can generate any file — PDF, Word, Excel, PowerPoint, CSV, charts, ZIP — with Code Interpreter, and
+              read attached Word/Excel files. Adds a small per-session fee on your OpenAI account.
+            </span>
+          </span>
+        </label>
+        <label className="check option">
+          <input type="checkbox" checked={tools.images} onChange={(e) => setTools((t) => ({ ...t, images: e.target.checked }))} />
+          <span>
+            <strong>Generate images</strong>
+            <span className="muted small">
+              Uses OpenAI image generation (billed separately; may require a verified organization).
+            </span>
+          </span>
+        </label>
       </div>
 
       <details className="details" open={!!tab}>

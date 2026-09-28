@@ -12,6 +12,15 @@ export interface Attachment {
   fileId?: string
 }
 
+/** A file the model produced. Only metadata is persisted; the bytes live in memory. */
+export interface GeneratedFile {
+  id: string
+  name: string
+  source: 'container' | 'image'
+  containerId?: string
+  fileId?: string
+}
+
 export interface Run {
   id: string
   input: string
@@ -19,6 +28,14 @@ export interface Run {
   model: string
   at: number
   error?: string
+  files?: GeneratedFile[]
+}
+
+export interface TabTools {
+  /** Code Interpreter: lets the model create any file (PDF, DOCX, XLSX, charts…) with Python. */
+  files: boolean
+  /** Image generation tool. */
+  images: boolean
 }
 
 export interface PromptTab {
@@ -31,6 +48,8 @@ export interface PromptTab {
   /** Empty string = use the default model from settings. */
   model: string
   attachments: Attachment[]
+  /** Missing on tabs created before tools existed — treat as all off. */
+  tools?: TabTools
   runs: Run[]
   createdAt: number
 }

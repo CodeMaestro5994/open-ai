@@ -691,3 +691,60 @@ textarea.prompt {
     flex-direction: column;
   }
 }
+
+/* ---------- Tool options & generated files ---------- */
+
+.check.option {
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.check.option input {
+  margin-top: 4px;
+}
+
+.check.option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gen-files {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gen-files li {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+}
+
+.gen-files img {
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.gen-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.error-text {
+  color: var(--danger);
+}
