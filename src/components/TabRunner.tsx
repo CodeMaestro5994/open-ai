@@ -1,42 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
-import type { GeneratedFile, PromptTab, Run } from '../types'
-import type { StreamedFile } from '../lib/openai'
-import { describeError, downloadContainerFile, listContainerFiles, streamResponse } from '../lib/openai'
-import { buildContent, buildInstructions, buildTools, formatSize } from '../lib/attachments'
-import { uid } from '../lib/storage'
+import { useEffect, useState } from 'react'
+import type { PromptTab, Run } from '../types'
+import { formatSize } from '../lib/attachments'
+import { fetchFile, markSeen, restoreRun, runTab, setInput, stopTab, useWorkspace } from '../lib/workspace'
 
 interface Props {
   apiKey: string
   defaultModel: string
   tab: PromptTab
+  isActive: () => boolean
   onAddRun: (tabId: string, run: Run) => void
   onClearRuns: (tabId: string) => void
   onEdit: () => void
   onDelete: () => void
-}
-
-/** A generated file plus its in-memory download state. */
-interface LiveFile extends GeneratedFile {
-  status: 'idle' | 'loading' | 'ready' | 'error'
-  url?: string
-  size?: number
-  mime?: string
-  error?: string
-}
-
-const toMeta = ({ id, name, source, containerId, fileId }: StreamedFile | LiveFile): GeneratedFile => ({
-  id,
-  name,
-  source,
-  containerId,
-  fileId,
-})
-
-function base64ToBlob(b64: string, mime: string): Blob {
-  const bin = atob(b64)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return new Blob([bytes], { type: mime })
 }
 
 function saveUrl(url: string, name: string) {
@@ -46,125 +21,18 @@ function saveUrl(url: string, name: string) {
   a.click()
 }
 
-export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClearRuns, onEdit, onDelete }: Props) {
-  const [input, setInput] = useState('')
-  const [output, setOutput] = useState('')
-  const [status, setStatus] = useState('')
-  const [files, setFiles] = useState<LiveFile[]>([])
-  const [error, setError] = useState('')
-  const [running, setRunning] = useState(false)
+export default function TabRunner({ apiKey, defaultModel, tab, isActive, onAddRun, onClearRuns, onEdit, onDelete }: Props) {
+  // Working state lives in the workspace store, so leaving this tab does not stop a running generation.
+  const { input, output, status, files, error, running, unseen } = useWorkspace(tab.id)
   const [copied, setCopied] = useState(false)
-  const abort = useRef<AbortController | null>(null)
-  const urls = useRef<string[]>([])
 
   const model = tab.model || defaultModel
 
-  // On leaving the tab: stop generation and free downloaded file blobs.
-  useEffect(
-    () => () => {
-      abort.current?.abort()
-      urls.current.forEach(URL.revokeObjectURL)
-    },
-    [],
-  )
+  useEffect(() => {
+    if (unseen) markSeen(tab.id)
+  }, [tab.id, unseen])
 
-  const patchFile = (id: string, patch: Partial<LiveFile>) =>
-    setFiles((list) => list.map((f) => (f.id === id ? { ...f, ...patch } : f)))
-
-  async function fetchFile(file: LiveFile | StreamedFile) {
-    patchFile(file.id, { status: 'loading', error: undefined })
-    try {
-      let blob: Blob
-      if ('base64' in file && file.base64) blob = base64ToBlob(file.base64, file.mime ?? 'image/png')
-      else if (file.containerId && file.fileId) blob = await downloadContainerFile(apiKey, file.containerId, file.fileId)
-      else throw new Error('Generated images are kept only until the page is closed.')
-      const url = URL.createObjectURL(blob)
-      urls.current.push(url)
-      patchFile(file.id, { status: 'ready', url, size: blob.size, mime: blob.type })
-    } catch (err) {
-      const msg = describeError(err)
-      patchFile(file.id, {
-        status: 'error',
-        error:
-          file.source === 'container' && /404|expired|not found/i.test(msg)
-            ? 'File expired — OpenAI deletes generated files after ~20 minutes of inactivity.'
-            : msg,
-      })
-    }
-  }
-
-  async function run() {
-    const text = input.trim()
-    if (!text || running) return
-    if (!apiKey || !model) {
-      setError('Add and test your API key first.')
-      return
-    }
-    const controller = new AbortController()
-    abort.current = controller
-    setRunning(true)
-    setOutput('')
-    setFiles([])
-    setError('')
-    setStatus('')
-    let result = ''
-    let produced: StreamedFile[] = []
-    let failure = ''
-    try {
-      const res = await streamResponse(
-        apiKey,
-        { model, instructions: buildInstructions(tab), content: buildContent(tab, text), tools: buildTools(tab) },
-        {
-          onDelta: (delta) => {
-            result += delta
-            setOutput((o) => o + delta)
-          },
-          onStatus: setStatus,
-        },
-        controller.signal,
-      )
-      produced = res.files
-      // Files the model saved without citing them in its reply.
-      if (res.containerIds.length) {
-        setStatus('Collecting files…')
-        for (const cid of res.containerIds) {
-          try {
-            for (const f of await listContainerFiles(apiKey, cid)) {
-              if (!produced.some((p) => p.fileId === f.fileId)) produced.push(f)
-            }
-          } catch {
-            // listing is best effort; cited files are still available
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        failure = describeError(err)
-        setError(failure)
-      }
-    } finally {
-      setRunning(false)
-      setStatus('')
-      abort.current = null
-    }
-
-    if (produced.length) {
-      setFiles(produced.map((f) => ({ ...toMeta(f), status: 'loading' })))
-      // Download right away — container files expire after ~20 minutes idle.
-      produced.forEach(fetchFile)
-    }
-    if (result || failure || produced.length) {
-      onAddRun(tab.id, {
-        id: uid(),
-        input: text,
-        output: result,
-        model,
-        at: Date.now(),
-        error: failure || undefined,
-        files: produced.length ? produced.map(toMeta) : undefined,
-      })
-    }
-  }
+  const run = () => runTab({ apiKey, tab, model, isActive, onAddRun })
 
   async function copy() {
     try {
@@ -180,19 +48,6 @@ export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClear
     const url = URL.createObjectURL(new Blob([output], { type: 'text/markdown' }))
     saveUrl(url, `${tab.name.replace(/[^\w-]+/g, '-').toLowerCase() || 'output'}.md`)
     URL.revokeObjectURL(url)
-  }
-
-  function restore(r: Run) {
-    setInput(r.input)
-    setOutput(r.output)
-    setError(r.error ?? '')
-    setFiles(
-      (r.files ?? []).map((f) =>
-        f.source === 'image'
-          ? { ...f, status: 'error', error: 'Generated images are kept only until the page is closed.' }
-          : { ...f, status: 'idle' },
-      ),
-    )
   }
 
   const fileCount = tab.attachments.length
@@ -233,7 +88,7 @@ export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClear
             <span>{tab.inputLabel || 'Input'}</span>
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => setInput(tab.id, e.target.value)}
               placeholder={tab.inputPlaceholder}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -246,7 +101,7 @@ export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClear
           <div className="actions">
             <span className="muted small">Ctrl + Enter</span>
             {running ? (
-              <button className="btn" onClick={() => abort.current?.abort()}>
+              <button className="btn" onClick={() => stopTab(tab.id)}>
                 Stop
               </button>
             ) : (
@@ -297,7 +152,7 @@ export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClear
                       )}
                       {f.status === 'loading' && <span className="muted small">Preparing…</span>}
                       {(f.status === 'idle' || f.status === 'error') && (
-                        <button className="btn small" onClick={() => fetchFile(f)}>
+                        <button className="btn small" onClick={() => fetchFile(apiKey, tab.id, f)}>
                           {f.status === 'error' ? 'Retry' : 'Fetch'}
                         </button>
                       )}
@@ -323,7 +178,7 @@ export default function TabRunner({ apiKey, defaultModel, tab, onAddRun, onClear
           <ul>
             {tab.runs.map((r) => (
               <li key={r.id}>
-                <button onClick={() => restore(r)}>
+                <button onClick={() => restoreRun(tab.id, r)} disabled={running}>
                   <span className="h-input">{r.input}</span>
                   <span className={r.error ? 'h-output error' : 'h-output'}>
                     {r.error ?? (r.output || r.files?.map((f) => f.name).join(', '))}

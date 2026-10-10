@@ -5,6 +5,7 @@ import TabEditor from './components/TabEditor'
 import TabRunner from './components/TabRunner'
 import { loadApiKey, loadSettings, loadTabs, saveApiKey, saveSettings, saveTabs } from './lib/storage'
 import { deleteFile } from './lib/openai'
+import { anyRunning, disposeTab, useAllWorkspaces } from './lib/workspace'
 
 type View = { kind: 'settings' } | { kind: 'new' } | { kind: 'edit'; id: string } | { kind: 'run'; id: string }
 
@@ -21,6 +22,22 @@ export default function App() {
   })
   const [storageWarning, setStorageWarning] = useState(false)
   const importInput = useRef<HTMLInputElement>(null)
+  const workspaces = useAllWorkspaces()
+
+  // Read by in-flight generations (which outlive renders) to know whether their tab is on screen.
+  const viewRef = useRef(view)
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
+
+  // Generations run in the background across tabs; warn before the page is closed mid-run.
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => {
+      if (anyRunning()) e.preventDefault()
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [])
 
   useEffect(() => {
     saveSettings(settings)
@@ -50,6 +67,7 @@ export default function App() {
   }
 
   function deleteTab(tab: PromptTab) {
+    disposeTab(tab.id)
     for (const a of tab.attachments) if (a.fileId) deleteFile(apiKey, a.fileId)
     const rest = tabs.filter((t) => t.id !== tab.id)
     setTabs(rest)
@@ -125,16 +143,21 @@ export default function App() {
       </header>
 
       <nav className="tabbar" aria-label="Prompt tabs">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            className={`tab ${t.id === activeId ? 'active' : ''}`}
-            onClick={() => setView({ kind: 'run', id: t.id })}
-            title={t.description}
-          >
-            {t.name}
-          </button>
-        ))}
+        {tabs.map((t) => {
+          const ws = workspaces[t.id]
+          return (
+            <button
+              key={t.id}
+              className={`tab ${t.id === activeId ? 'active' : ''}`}
+              onClick={() => setView({ kind: 'run', id: t.id })}
+              title={ws?.running ? 'Generating…' : ws?.unseen ? 'New result' : t.description}
+            >
+              {t.name}
+              {ws?.running && <span className="tab-dot running" aria-label="generating" />}
+              {!ws?.running && ws?.unseen && <span className="tab-dot unseen" aria-label="new result" />}
+            </button>
+          )
+        })}
         <button
           className={`tab add ${view.kind === 'new' ? 'active' : ''}`}
           onClick={() => setView({ kind: 'new' })}
@@ -191,6 +214,7 @@ export default function App() {
             apiKey={apiKey}
             defaultModel={settings.defaultModel}
             tab={activeTab}
+            isActive={() => viewRef.current.kind === 'run' && viewRef.current.id === activeTab.id}
             onAddRun={addRun}
             onClearRuns={clearRuns}
             onEdit={() => setView({ kind: 'edit', id: activeTab.id })}
