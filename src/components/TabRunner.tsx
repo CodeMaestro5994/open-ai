@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
-import type { PromptTab, Run } from '../types'
+import type { PromptTab, Run, Settings } from '../types'
 import { formatSize } from '../lib/attachments'
+import { modelFor, providerInfo, tabProvider } from '../lib/providers'
+import type { ApiKeys } from '../lib/workspace'
 import { fetchFile, markSeen, restoreRun, runTab, setInput, stopTab, useWorkspace } from '../lib/workspace'
 
 interface Props {
-  apiKey: string
-  defaultModel: string
+  keys: ApiKeys
+  settings: Settings
   tab: PromptTab
   isActive: () => boolean
   onAddRun: (tabId: string, run: Run) => void
@@ -21,18 +23,19 @@ function saveUrl(url: string, name: string) {
   a.click()
 }
 
-export default function TabRunner({ apiKey, defaultModel, tab, isActive, onAddRun, onClearRuns, onEdit, onDelete }: Props) {
+export default function TabRunner({ keys, settings, tab, isActive, onAddRun, onClearRuns, onEdit, onDelete }: Props) {
   // Working state lives in the workspace store, so leaving this tab does not stop a running generation.
   const { input, output, status, files, error, running, unseen } = useWorkspace(tab.id)
   const [copied, setCopied] = useState(false)
 
-  const model = tab.model || defaultModel
+  const provider = tabProvider(tab)
+  const model = modelFor(tab, settings)
 
   useEffect(() => {
     if (unseen) markSeen(tab.id)
   }, [tab.id, unseen])
 
-  const run = () => runTab({ apiKey, tab, model, isActive, onAddRun })
+  const run = () => runTab({ keys, settings, tab, isActive, onAddRun })
 
   async function copy() {
     try {
@@ -59,7 +62,9 @@ export default function TabRunner({ apiKey, defaultModel, tab, isActive, onAddRu
           <h2>{tab.name}</h2>
           {tab.description && <p className="muted">{tab.description}</p>}
           <p className="meta">
-            <span className="pill">{model || 'no model'}</span>
+            <span className="pill">
+              {providerInfo(provider).label} · {model || 'no model'}
+            </span>
             {tab.tools?.files && <span className="pill">Creates files</span>}
             {tab.tools?.images && <span className="pill">Generates images</span>}
             {fileCount > 0 && (
@@ -152,7 +157,7 @@ export default function TabRunner({ apiKey, defaultModel, tab, isActive, onAddRu
                       )}
                       {f.status === 'loading' && <span className="muted small">Preparing…</span>}
                       {(f.status === 'idle' || f.status === 'error') && (
-                        <button className="btn small" onClick={() => fetchFile(apiKey, tab.id, f)}>
+                        <button className="btn small" onClick={() => fetchFile(keys, tab.id, f, f.provider ?? provider)}>
                           {f.status === 'error' ? 'Retry' : 'Fetch'}
                         </button>
                       )}

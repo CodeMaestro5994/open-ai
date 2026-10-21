@@ -1,9 +1,10 @@
 import { useSyncExternalStore } from 'react'
-import type { GeneratedFile, PromptTab, Run } from '../types'
+import type { GeneratedFile, PromptTab, ProviderId, Run, Settings } from '../types'
 import type { StreamedFile } from './openai'
-import { describeError, downloadContainerFile, listContainerFiles, streamResponse } from './openai'
-import { buildContent, buildInstructions, buildTools } from './attachments'
+import { describeError, downloadGenerated, isAbort, modelFor, providerInfo, streamResponse, tabProvider } from './providers'
 import { uid } from './storage'
+
+export type ApiKeys = Record<ProviderId, string>
 
 // Per-tab working state (input draft, streaming output, generated files) lives
 // here rather than in the TabRunner component, so a generation keeps running
@@ -85,13 +86,10 @@ export function disposeTab(tabId: string) {
   listeners.forEach((l) => l())
 }
 
-const toMeta = ({ id, name, source, containerId, fileId }: StreamedFile | LiveFile): GeneratedFile => ({
-  id,
-  name,
-  source,
-  containerId,
-  fileId,
-})
+const toMeta = (
+  { id, name, source, containerId, fileId }: StreamedFile | LiveFile,
+  provider: ProviderId,
+): GeneratedFile => ({ id, name, source, containerId, fileId, provider })
 
 function base64ToBlob(b64: string, mime: string): Blob {
   const bin = atob(b64)
@@ -102,13 +100,13 @@ function base64ToBlob(b64: string, mime: string): Blob {
 
 const IMAGE_GONE = 'Generated images are kept only until the page is closed.'
 
-export async function fetchFile(apiKey: string, tabId: string, file: LiveFile | StreamedFile) {
+export async function fetchFile(keys: ApiKeys, tabId: string, file: LiveFile | StreamedFile, provider: ProviderId) {
   patchFile(tabId, file.id, { status: 'loading', error: undefined })
   try {
-    let blob: Blob
-    if ('base64' in file && file.base64) blob = base64ToBlob(file.base64, file.mime ?? 'image/png')
-    else if (file.containerId && file.fileId) blob = await downloadContainerFile(apiKey, file.containerId, file.fileId)
-    else throw new Error(IMAGE_GONE)
+    const blob =
+      'base64' in file && file.base64
+        ? base64ToBlob(file.base64, file.mime ?? 'image/png')
+        : await downloadGenerated(keys[provider], file)
     const url = URL.createObjectURL(blob)
     blobUrls.set(tabId, [...(blobUrls.get(tabId) ?? []), url])
     patchFile(tabId, file.id, { status: 'ready', url, size: blob.size, mime: blob.type })
@@ -125,20 +123,23 @@ export async function fetchFile(apiKey: string, tabId: string, file: LiveFile | 
 }
 
 interface RunOptions {
-  apiKey: string
+  keys: ApiKeys
+  settings: Settings
   tab: PromptTab
-  model: string
   /** Is the user currently looking at this tab? Used to flag unseen results. */
   isActive: () => boolean
   onAddRun: (tabId: string, run: Run) => void
 }
 
-export async function runTab({ apiKey, tab, model, isActive, onAddRun }: RunOptions) {
+export async function runTab({ keys, settings, tab, isActive, onAddRun }: RunOptions) {
   const tabId = tab.id
+  const provider = tabProvider(tab)
+  const apiKey = keys[provider]
+  const model = modelFor(tab, settings)
   const text = (state[tabId]?.input ?? '').trim()
   if (!text || state[tabId]?.running) return
   if (!apiKey || !model) {
-    patch(tabId, { error: 'Add and test your API key first.' })
+    patch(tabId, { error: `Add and test your ${providerInfo(provider).label} API key first.` })
     return
   }
 
@@ -152,8 +153,11 @@ export async function runTab({ apiKey, tab, model, isActive, onAddRun }: RunOpti
   let failure = ''
   try {
     const res = await streamResponse(
+      tab,
       apiKey,
-      { model, instructions: buildInstructions(tab), content: buildContent(tab, text), tools: buildTools(tab) },
+      model,
+      settings.providers[provider],
+      text,
       {
         onDelta: (delta) => {
           result += delta
@@ -164,21 +168,8 @@ export async function runTab({ apiKey, tab, model, isActive, onAddRun }: RunOpti
       controller.signal,
     )
     produced = res.files
-    // Files the model saved without citing them in its reply.
-    if (res.containerIds.length) {
-      patch(tabId, { status: 'Collecting files…' })
-      for (const cid of res.containerIds) {
-        try {
-          for (const f of await listContainerFiles(apiKey, cid)) {
-            if (!produced.some((p) => p.fileId === f.fileId)) produced.push(f)
-          }
-        } catch {
-          // listing is best effort; cited files are still available
-        }
-      }
-    }
   } catch (err) {
-    if ((err as Error).name !== 'AbortError') failure = describeError(err)
+    if (!controller.signal.aborted && !isAbort(err)) failure = describeError(err)
   } finally {
     controllers.delete(tabId)
   }
@@ -191,10 +182,10 @@ export async function runTab({ apiKey, tab, model, isActive, onAddRun }: RunOpti
     status: '',
     error: failure,
     unseen: !isActive(),
-    files: produced.map((f) => ({ ...toMeta(f), status: 'loading' })),
+    files: produced.map((f) => ({ ...toMeta(f, provider), status: 'loading' })),
   })
-  // Download right away — container files expire after ~20 minutes idle.
-  produced.forEach((f) => fetchFile(apiKey, tabId, f))
+  // Download right away — OpenAI container files expire after ~20 minutes idle.
+  produced.forEach((f) => fetchFile(keys, tabId, f, provider))
 
   if (result || failure || produced.length) {
     onAddRun(tabId, {
@@ -204,7 +195,7 @@ export async function runTab({ apiKey, tab, model, isActive, onAddRun }: RunOpti
       model,
       at: Date.now(),
       error: failure || undefined,
-      files: produced.length ? produced.map(toMeta) : undefined,
+      files: produced.length ? produced.map((f) => toMeta(f, provider)) : undefined,
     })
   }
 }

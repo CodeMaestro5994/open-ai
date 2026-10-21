@@ -18,6 +18,16 @@ Frontend only — no backend, no database. Deploys as a static site (e.g. Vercel
   - *Generate images* enables the `image_generation` tool; images arrive base64 in the response and are shown with a download button.
   - File bytes are kept in memory only; history keeps file names and can re-fetch container files while they still exist.
 
+## Claude (Anthropic) support
+
+Each tab runs on **OpenAI** or **Claude** — add either key, or both, on the API keys screen. Claude uses the official `@anthropic-ai/sdk` in browser mode (`dangerouslyAllowBrowser`), loaded lazily so OpenAI-only users don't download it.
+
+- *Test key* lists models (`GET /v1/models`, retired models hidden) and makes a tiny `messages.create` call. Default model: `claude-opus-5` when available.
+- Generation streams from `POST /v1/messages`. For `claude-opus-5`, `claude-opus-5-5` and `claude-fable-5-1` it opts into server-side refusal fallbacks (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Tab names come from `messages.parse` with a Zod schema.
+- **Browser limits:** Anthropic allows browser (CORS) calls to Messages and Models but **not the Files API**. So for Claude:
+  - PDFs and images are stored in the browser (IndexedDB) and sent inline (base64) with each request, with prompt caching on the prompt and attachments. Word/Excel files must be saved as PDF first. These files are not part of **Export**.
+  - *Create downloadable files* and *Generate images* are OpenAI-only; generated files could not be downloaded without a server.
+
 ## Development
 
 ```bash

@@ -1,12 +1,23 @@
 import { useRef, useState } from 'react'
-import type { Attachment, PromptTab, Settings, TabTools } from '../types'
-import { deleteFile, describeError, generateTabMeta, textModels } from '../lib/openai'
-import { ACCEPT, createAttachment, formatSize } from '../lib/attachments'
-import { uid } from '../lib/storage'
+import type { Attachment, PromptTab, ProviderId, Settings, TabTools } from '../types'
+import {
+  PROVIDERS,
+  deleteFile,
+  describeError,
+  generateTabMeta,
+  isVerified,
+  providerInfo,
+  tabProvider,
+  textModels,
+  uploadFile,
+} from '../lib/providers'
+import { ACCEPT, createAttachment, foreignAttachments, formatSize } from '../lib/attachments'
+import type { ApiKeys } from '../lib/workspace'
+import { timestamp, uid } from '../lib/storage'
 import { TEMPLATES } from '../lib/templates'
 
 interface Props {
-  apiKey: string
+  keys: ApiKeys
   settings: Settings
   tab?: PromptTab
   onSave: (tab: PromptTab) => void
@@ -19,12 +30,13 @@ interface Pending {
   error?: string
 }
 
-export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: Props) {
+export default function TabEditor({ keys, settings, tab, onSave, onCancel }: Props) {
   const [instructions, setInstructions] = useState(tab?.instructions ?? '')
   const [name, setName] = useState(tab?.name ?? '')
   const [description, setDescription] = useState(tab?.description ?? '')
   const [inputLabel, setInputLabel] = useState(tab?.inputLabel ?? '')
   const [inputPlaceholder, setInputPlaceholder] = useState(tab?.inputPlaceholder ?? '')
+  const [provider, setProvider] = useState<ProviderId>(tab ? tabProvider(tab) : settings.defaultProvider)
   const [model, setModel] = useState(tab?.model ?? '')
   const [attachments, setAttachments] = useState<Attachment[]>(tab?.attachments ?? [])
   const [tools, setTools] = useState<TabTools>(tab?.tools ?? { files: !tab, images: false })
@@ -34,16 +46,28 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
   const [dragging, setDragging] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
-  const effectiveModel = model || settings.defaultModel
+  const apiKey = keys[provider]
+  const info = providerInfo(provider)
+  const providerModels = settings.providers[provider]
+  const effectiveModel = model || providerModels.defaultModel
   const uploading = pending.some((p) => !p.error)
   const originalFileIds = new Set((tab?.attachments ?? []).map((a) => a.fileId).filter(Boolean))
+  // Uploaded files belong to one provider; switching the tab's provider means re-adding them.
+  const foreign = foreignAttachments({ attachments, provider })
+  const providerChoices = PROVIDERS.filter((p) => p.id === provider || isVerified(settings.providers[p.id]))
+
+  /** Deletes an uploaded attachment from whichever provider holds it. */
+  const discard = (a: Attachment) => {
+    const owner = a.provider ?? 'openai'
+    if (a.fileId) deleteFile(owner, keys[owner], a.fileId)
+  }
 
   async function addFiles(files: FileList | File[]) {
     for (const file of Array.from(files)) {
       const p: Pending = { id: uid(), name: file.name }
       setPending((list) => [...list, p])
       try {
-        const att = await createAttachment(apiKey, file)
+        const att = await createAttachment(file, provider, (f, kind) => uploadFile(provider, apiKey, f, kind))
         setAttachments((list) => [...list, att])
         setPending((list) => list.filter((x) => x.id !== p.id))
       } catch (err) {
@@ -55,11 +79,11 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
   function removeAttachment(att: Attachment) {
     setAttachments((list) => list.filter((a) => a.id !== att.id))
     // Files uploaded during this edit can be deleted right away; originals are deleted on save.
-    if (att.fileId && !originalFileIds.has(att.fileId)) deleteFile(apiKey, att.fileId)
+    if (att.fileId && !originalFileIds.has(att.fileId)) discard(att)
   }
 
   function cancel() {
-    for (const a of attachments) if (a.fileId && !originalFileIds.has(a.fileId)) deleteFile(apiKey, a.fileId)
+    for (const a of attachments) if (a.fileId && !originalFileIds.has(a.fileId)) discard(a)
     onCancel()
   }
 
@@ -67,7 +91,7 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
     setBusy('suggest')
     setError('')
     try {
-      const meta = await generateTabMeta(apiKey, effectiveModel, instructions)
+      const meta = await generateTabMeta(provider, apiKey, effectiveModel, instructions)
       setName(meta.name)
       setDescription(meta.description)
       setInputLabel(meta.inputLabel)
@@ -80,12 +104,16 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
   }
 
   async function save() {
+    if (foreign.length) {
+      setError(`Remove and re-add ${foreign.map((a) => a.name).join(', ')} — they were uploaded for another provider.`)
+      return
+    }
     setBusy('save')
     setError('')
     let meta = { name, description, inputLabel, inputPlaceholder }
     if (!name.trim()) {
       try {
-        meta = await generateTabMeta(apiKey, effectiveModel, instructions)
+        meta = await generateTabMeta(provider, apiKey, effectiveModel, instructions)
       } catch (err) {
         setBusy('')
         setError(`Could not name the tab automatically (${describeError(err)}). Enter a name below.`)
@@ -93,16 +121,17 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
       }
     }
     const kept = new Set(attachments.map((a) => a.fileId))
-    for (const id of originalFileIds) if (!kept.has(id)) deleteFile(apiKey, id!)
+    for (const a of tab?.attachments ?? []) if (a.fileId && !kept.has(a.fileId)) discard(a)
 
     onSave({
       id: tab?.id ?? uid(),
-      createdAt: tab?.createdAt ?? Date.now(),
+      createdAt: tab?.createdAt ?? timestamp(),
       runs: tab?.runs ?? [],
       instructions: instructions.trim(),
+      provider,
       model,
       attachments,
-      tools,
+      tools: { files: tools.files && info.files, images: tools.images && info.images },
       name: meta.name.trim(),
       description: meta.description.trim(),
       inputLabel: meta.inputLabel.trim() || 'Input',
@@ -131,6 +160,28 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
               <span>{t.summary}</span>
             </button>
           ))}
+        </div>
+      )}
+
+      {providerChoices.length > 1 && (
+        <div className="field">
+          <span>AI provider</span>
+          <div className="segmented" role="radiogroup" aria-label="AI provider">
+            {providerChoices.map((p) => (
+              <button
+                key={p.id}
+                role="radio"
+                aria-checked={provider === p.id}
+                className={provider === p.id ? 'on' : ''}
+                onClick={() => {
+                  setProvider(p.id)
+                  setModel('')
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -166,8 +217,10 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
         >
           <strong>Drop files here or click to browse</strong>
           <span className="muted small">
-            Your résumé, portfolio, past bids, style guides… Text files are added to the prompt; PDFs, documents and
-            images are uploaded to your OpenAI account.
+            Your résumé, portfolio, past bids, style guides… Text files are added to the prompt;{' '}
+            {provider === 'openai'
+              ? 'PDFs, documents and images are uploaded to your OpenAI account.'
+              : 'PDFs and images are kept in this browser and sent to Claude with each request.'}
           </span>
           <input
             ref={fileInput}
@@ -185,10 +238,14 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
         {(attachments.length > 0 || pending.length > 0) && (
           <ul className="files">
             {attachments.map((a) => (
-              <li key={a.id}>
+              <li key={a.id} className={foreign.includes(a) ? 'error' : ''}>
                 <span className={`badge ${a.kind}`}>{a.kind === 'text' ? 'TEXT' : a.kind === 'image' ? 'IMG' : 'FILE'}</span>
                 <span className="file-name">{a.name}</span>
-                <span className="muted small">{formatSize(a.size)}</span>
+                {foreign.includes(a) ? (
+                  <span className="small">Uploaded for {providerInfo(a.provider ?? 'openai').label} — remove and re-add</span>
+                ) : (
+                  <span className="muted small">{formatSize(a.size)}</span>
+                )}
                 <button className="link danger" onClick={() => removeAttachment(a)}>
                   Remove
                 </button>
@@ -212,22 +269,35 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
 
       <div className="field">
         <span>Output</span>
-        <label className="check option">
-          <input type="checkbox" checked={tools.files} onChange={(e) => setTools((t) => ({ ...t, files: e.target.checked }))} />
+        <label className={`check option ${info.files ? '' : 'disabled'}`}>
+          <input
+            type="checkbox"
+            checked={tools.files && info.files}
+            disabled={!info.files}
+            onChange={(e) => setTools((t) => ({ ...t, files: e.target.checked }))}
+          />
           <span>
             <strong>Create downloadable files</strong>
             <span className="muted small">
-              The AI can generate any file — PDF, Word, Excel, PowerPoint, CSV, charts, ZIP — with Code Interpreter, and
-              read attached Word/Excel files. Adds a small per-session fee on your OpenAI account.
+              {info.files
+                ? 'The AI can generate any file — PDF, Word, Excel, PowerPoint, CSV, charts, ZIP — with Code Interpreter, and read attached Word/Excel files. Adds a small per-session fee on your OpenAI account.'
+                : info.filesNote}
             </span>
           </span>
         </label>
-        <label className="check option">
-          <input type="checkbox" checked={tools.images} onChange={(e) => setTools((t) => ({ ...t, images: e.target.checked }))} />
+        <label className={`check option ${info.images ? '' : 'disabled'}`}>
+          <input
+            type="checkbox"
+            checked={tools.images && info.images}
+            disabled={!info.images}
+            onChange={(e) => setTools((t) => ({ ...t, images: e.target.checked }))}
+          />
           <span>
             <strong>Generate images</strong>
             <span className="muted small">
-              Uses OpenAI image generation (billed separately; may require a verified organization).
+              {info.images
+                ? 'Uses OpenAI image generation (billed separately; may require a verified organization).'
+                : 'Not available for Claude — it reads images but does not generate them.'}
             </span>
           </span>
         </label>
@@ -245,8 +315,8 @@ export default function TabEditor({ apiKey, settings, tab, onSave, onCancel }: P
           <label className="field">
             <span>Model</span>
             <select value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="">Default ({settings.defaultModel || 'none'})</option>
-              {textModels(settings.models).map((m) => (
+              <option value="">Default ({providerModels.defaultModel || 'none'})</option>
+              {textModels(provider, providerModels.models).map((m) => (
                 <option key={m}>{m}</option>
               ))}
             </select>

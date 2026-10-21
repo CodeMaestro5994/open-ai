@@ -774,3 +774,57 @@ textarea.prompt {
     transform: scale(0.7);
   }
 }
+
+/* ---------- Multiple providers ---------- */
+
+.key-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.key-panel > .card-head {
+  padding: 0 4px;
+}
+
+.pill.ok-pill {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.key-pill .dot.partial {
+  background: var(--warn);
+}
+
+.segmented {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.segmented button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 16px;
+  border-radius: 7px;
+  font-weight: 600;
+}
+
+.segmented button.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.check.option.disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}

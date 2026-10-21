@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import type { PromptTab, Run, Settings } from './types'
+import type { PromptTab, ProviderId, Run, Settings } from './types'
 import ApiKeyPanel from './components/ApiKeyPanel'
 import TabEditor from './components/TabEditor'
 import TabRunner from './components/TabRunner'
 import { loadApiKey, loadSettings, loadTabs, saveApiKey, saveSettings, saveTabs } from './lib/storage'
-import { deleteFile } from './lib/openai'
+import { PROVIDERS, deleteFile, isVerified } from './lib/providers'
+import type { ApiKeys } from './lib/workspace'
 import { anyRunning, disposeTab, useAllWorkspaces } from './lib/workspace'
 
 type View = { kind: 'settings' } | { kind: 'new' } | { kind: 'edit'; id: string } | { kind: 'run'; id: string }
@@ -12,12 +13,12 @@ type View = { kind: 'settings' } | { kind: 'new' } | { kind: 'edit'; id: string 
 const MAX_RUNS = 30
 
 export default function App() {
-  const [apiKey, setApiKey] = useState(loadApiKey)
+  const [keys, setKeys] = useState<ApiKeys>(() => ({ openai: loadApiKey('openai'), anthropic: loadApiKey('anthropic') }))
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [tabs, setTabs] = useState<PromptTab[]>(loadTabs)
   const [view, setView] = useState<View>(() => {
     const first = tabs[0]
-    if (!apiKey || !settings.keyVerifiedAt) return { kind: 'settings' }
+    if (!PROVIDERS.some((p) => keys[p.id] && isVerified(settings.providers[p.id]))) return { kind: 'settings' }
     return first ? { kind: 'run', id: first.id } : { kind: 'new' }
   })
   const [storageWarning, setStorageWarning] = useState(false)
@@ -52,13 +53,14 @@ export default function App() {
     if (!saveTabs(tabs)) queueMicrotask(() => setStorageWarning(true))
   }, [tabs])
 
-  const verified = !!apiKey && !!settings.keyVerifiedAt
+  const connected = PROVIDERS.filter((p) => keys[p.id] && isVerified(settings.providers[p.id]))
+  const verified = connected.length > 0
   const activeId = view.kind === 'run' || view.kind === 'edit' ? view.id : ''
   const activeTab = tabs.find((t) => t.id === activeId)
 
-  function saveKey(key: string, remember: boolean) {
-    setApiKey(key)
-    saveApiKey(key, remember)
+  function saveKey(provider: ProviderId, key: string, remember: boolean) {
+    setKeys((k) => ({ ...k, [provider]: key }))
+    saveApiKey(provider, key, remember)
   }
 
   function upsertTab(tab: PromptTab) {
@@ -68,7 +70,10 @@ export default function App() {
 
   function deleteTab(tab: PromptTab) {
     disposeTab(tab.id)
-    for (const a of tab.attachments) if (a.fileId) deleteFile(apiKey, a.fileId)
+    for (const a of tab.attachments) {
+      const owner = a.provider ?? 'openai'
+      if (a.fileId) deleteFile(owner, keys[owner], a.fileId)
+    }
     const rest = tabs.filter((t) => t.id !== tab.id)
     setTabs(rest)
     setView(rest[0] ? { kind: 'run', id: rest[0].id } : { kind: 'new' })
@@ -137,7 +142,7 @@ export default function App() {
             title="API key settings"
           >
             <span className="dot" />
-            {verified ? settings.defaultModel || 'Key connected' : 'Add API key'}
+            {verified ? connected.map((p) => p.label).join(' + ') : 'Add API key'}
           </button>
         </div>
       </header>
@@ -177,7 +182,7 @@ export default function App() {
 
         {view.kind === 'settings' && (
           <ApiKeyPanel
-            apiKey={apiKey}
+            keys={keys}
             settings={settings}
             onSaveKey={saveKey}
             onSettings={(patch) => setSettings((s) => ({ ...s, ...patch }))}
@@ -190,7 +195,7 @@ export default function App() {
         {view.kind === 'new' && (
           <TabEditor
             key="new"
-            apiKey={apiKey}
+            keys={keys}
             settings={settings}
             onSave={upsertTab}
             onCancel={() => setView(tabs[0] ? { kind: 'run', id: tabs[0].id } : { kind: 'settings' })}
@@ -200,7 +205,7 @@ export default function App() {
         {view.kind === 'edit' && activeTab && (
           <TabEditor
             key={activeTab.id}
-            apiKey={apiKey}
+            keys={keys}
             settings={settings}
             tab={activeTab}
             onSave={upsertTab}
@@ -211,8 +216,8 @@ export default function App() {
         {view.kind === 'run' && activeTab && (
           <TabRunner
             key={activeTab.id}
-            apiKey={apiKey}
-            defaultModel={settings.defaultModel}
+            keys={keys}
+            settings={settings}
             tab={activeTab}
             isActive={() => viewRef.current.kind === 'run' && viewRef.current.id === activeTab.id}
             onAddRun={addRun}
